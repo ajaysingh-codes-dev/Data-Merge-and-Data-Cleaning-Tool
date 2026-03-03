@@ -56,8 +56,7 @@ def get_common_column(df1, df2):
     common_cols = list(df1.columns.intersection(df2.columns))
 
     if not common_cols:
-        st.error("No common columns found between datasets.")
-        return None
+        st.stop()
 
     return common_cols
 # ===============================
@@ -188,6 +187,57 @@ def save_df(df):
         data = df.to_json(orient="records", indent=4).encode("utf-8")
         st.download_button("Download JSON", data, "merged.json", "application/json")
 
+def find_groupby_candidates(df, max_unique_ratio=0.5):
+    candidates = []
+    total_rows = len(df)
+
+    for col in df.columns:
+        unique_ratio = df[col].nunique() / total_rows
+        
+        if unique_ratio < max_unique_ratio:
+            candidates.append(col)
+
+    return candidates
+
+def auto_groupby_fillna(df, group_col):
+    df = df.copy()
+    grouped = df.groupby(group_col)
+
+    # --------------------
+    # CATEGORICAL FILL
+    # --------------------
+    for col in df.select_dtypes(include=["object", "category"]).columns:
+        if col == group_col:
+            continue
+
+        global_mode = df[col].mode()
+        fallback = global_mode.iloc[0] if not global_mode.empty else None
+
+        df[col] = df[col].fillna(
+            grouped[col]
+            .transform(lambda x: x.mode().iloc[0] if not x.mode().empty else fallback)
+        )
+
+        # Final fallback safety
+        if df[col].isna().any() and fallback is not None:
+            df[col] = df[col].fillna(fallback)
+
+    # --------------------
+    # NUMERIC FILL
+    # --------------------
+    for col in df.select_dtypes(include="number").columns:
+        df[col] = df[col].fillna(
+            grouped[col]
+            .transform("median")
+            .fillna(df[col].median())
+        )
+
+        # Final numeric safety
+        if df[col].isna().any():
+            df[col] = df[col].fillna(df[col].median())
+
+    return df
+
 def main():
     st.set_page_config(page_title="AJ_Tech_Tool", layout="wide")
 
@@ -264,82 +314,114 @@ def main():
         """, unsafe_allow_html=True)
 
         file = st.file_uploader("📂 Upload your dataset",
-                                type=["csv", "xlsx", "json"],
-                                help="Supported formats: CSV, Excel, JSON")
+                                type=["csv", "xlsx", "json"])
 
         if file:
-            with st.spinner("🔍 Reading file..."):
-                df = read_file(file)
+            df = read_file(file)
 
             st.success("✅ File Loaded Successfully")
 
-            # BEFORE CLEANING SECTION
-            with st.expander("📊 View Raw Data", expanded=False):
+            with st.expander("📊 Raw Data Preview"):
                 st.dataframe(df, use_container_width=True)
 
-            # Metrics before cleaning
+            # =========================
+            # BEFORE METRICS
+            # =========================
+            rows_before = df.shape[0]
+            cols_before = df.shape[1]
+            missing_before = df.isna().sum().sum()
+
             col1, col2, col3 = st.columns(3)
-            col1.metric("Rows", df.shape[0])
-            col2.metric("Columns", df.shape[1])
-            col3.metric("Missing Values", df.isna().sum().sum())
+            col1.metric("Rows", rows_before)
+            col2.metric("Columns", cols_before)
+            col3.metric("Remaining Missing", missing_before)
 
-            st.markdown("---")
-            st.markdown("### 🧹 Running Cleaning Pipeline...")
-
+            # =========================
+            # CLEANING PIPELINE
+            # =========================
             progress = st.progress(0)
 
-            report["rows_before"] = df.shape[0]
-            report["cols_before"] = df.shape[1]
-
             df = clean_column(df)
-            progress.progress(20)
+            progress.progress(15)
 
             df = trim_string_spaces(df)
-            progress.progress(40)
+            progress.progress(30)
 
             df = remove_duplicates(df)
-            progress.progress(60)
+            progress.progress(45)
 
             df = clean_numeric_strings(df)
-            progress.progress(80)
+            progress.progress(60)
 
             df = remove_empty_rows_column(df)
-            progress.progress(100)
+            progress.progress(75)
 
+            # Group-based fill
+            candidates = find_groupby_candidates(df)
+
+            group_used = None
+            if candidates:
+                group_used = st.selectbox("Select grouping column", candidates)
+                df = auto_groupby_fillna(df, group_used)
+            else:
+                st.warning("No suitable grouping columns found.")
+
+            progress.progress(100)
             st.success("🚀 Data Cleaning Completed Successfully!")
 
-            report["rows_after"] = df.shape[0]
-            report["cols_after"] = df.shape[1]
+            # =========================
+            # AFTER METRICS
+            # =========================
+            rows_after = df.shape[0]
+            cols_after = df.shape[1]
+            missing_after = df.isna().sum().sum()
 
-            # AFTER CLEANING SECTION
+            # =========================
+            # SUMMARY CALCULATIONS
+            # =========================
+            summary = {
+                "Rows Before": rows_before,
+                "Rows After": rows_after,
+                "Rows Removed": rows_before - rows_after,
+                "Columns Before": cols_before,
+                "Columns After": cols_after,
+                "Columns Removed": cols_before - cols_after,
+                "Missing Values Before": missing_before,
+                "Missing Values After": missing_after,
+                "Missing Values Filled": missing_before - missing_after,
+                "Grouping Column Used": group_used if group_used else "None",
+            }
+
+            # =========================
+            # DISPLAY CLEANED DATA
+            # =========================
             st.markdown("### ✨ Cleaned Dataset")
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Rows After Cleaning", df.shape[0])
-            col2.metric("Columns After Cleaning", df.shape[1])
-            col3.metric("Remaining Missing", df.isna().sum().sum())
+            col1.metric("Rows", rows_after)
+            col2.metric("Columns", cols_after)
+            col3.metric("Remaining Missing", missing_after)
 
             with st.expander("🔎 View Cleaned Data", expanded=True):
                 st.dataframe(df, use_container_width=True)
 
-            st.subheader("📋 Cleaning Report")
+            # =========================
+            # SUMMARY REPORT SECTION
+            # =========================
+            st.markdown("## 📋 Cleaning Summary Report")
 
-            col1, col2 = st.columns(2)
+            summary_df = pd.DataFrame(summary.items(), columns=["Metric", "Value"])
+            st.table(summary_df)
 
-            col1.metric("Rows Removed", report["rows_before"] - report["rows_after"])
-            col1.metric("Duplicates Removed", report["duplicates_removed"])
-
-            col2.metric("Columns Removed", report["cols_before"] - report["cols_after"])
-            col2.metric("Spaces Trimmed", report["spaces_trimmed"])
+            if "numeric_converted" in report and report["numeric_converted"]:
+                st.markdown("### 🔢 Columns Converted to Numeric")
+                st.write(", ".join(report["numeric_converted"]))
 
             st.markdown("---")
-
-            # Download button
-            st.subheader(
-                "⬇ Download Cleaned File",)
+            st.subheader("⬇ Download Cleaned File")
             save_cleaned_df(df)
 
-        # call cleaning functions here
+            # call cleaning functions here
 
     elif tool == "Data Merge":
         st.markdown("""
