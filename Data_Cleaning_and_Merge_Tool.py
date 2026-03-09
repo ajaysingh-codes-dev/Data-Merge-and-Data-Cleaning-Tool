@@ -108,10 +108,20 @@ def trim_string_spaces(df):
 # Fix Numeric Values
 # ===============================
 def clean_numeric_strings(df, report=None, threshold=0.6):
+
+    date_keywords = ["date","time","created","timestamp",
+                     "updated","modified","dob","birth",
+                    "login","event"]
+    mask_date = df.columns.str.lower().str.contains("|".join(date_keywords))
+    date_col = df.columns[mask_date]
+    for col in date_col:
+        df[col] = pd.to_datetime(df[col], format="mixed", dayfirst=True, errors="coerce")
+        df[col] = df[col].fillna(df[col].median())
+
     object_cols = df.select_dtypes(include="object").columns
 
     for col in object_cols:
-        series = df[col].astype(str)
+        series = df[col].astype("string")
 
         # ALWAYS remove formatting first
         invalid_values = [
@@ -121,10 +131,8 @@ def clean_numeric_strings(df, report=None, threshold=0.6):
             series
             .str.replace(r"[,$₹ ]", "", regex=True)
             .str.replace("%", "", regex=False)
-            .replace(['nan', 'None', ''], np.nan)
             .replace(invalid_values, np.nan)
         )
-
         df[col] = cleaned  # ← update column before conversion attempt
 
         converted = pd.to_numeric(cleaned, errors="coerce")
